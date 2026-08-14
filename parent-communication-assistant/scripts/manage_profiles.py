@@ -63,11 +63,14 @@ CURRENT_PROFILE_HEADINGS = (
 
 COMMUNICATION_HEADINGS = (
     "# 沟通记录",
+    "## 日期与渠道",
+    "## 本次问题",
     "## 已确认事实",
     "## 家长核心关注",
     "## 教师实际回应",
     "## 达成共识",
     "## 待跟进事项",
+    "## 是否更新长期概况",
 )
 
 TEACHER_PROFILE_HEADINGS = (
@@ -153,6 +156,9 @@ def load_settings(settings_path: Path | None = None) -> dict[str, object]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ArchiveError(f"设置文件无法读取：{exc}") from exc
 
+    if not isinstance(payload, dict):
+        raise ArchiveError("设置文件顶层必须是 JSON 对象。")
+
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise ArchiveError("档案版本不兼容，请先完成数据迁移。")
 
@@ -189,6 +195,9 @@ def initialize_archive(
 ) -> dict[str, object]:
     """初始化空档案，或安全连接一套已经存在的完整档案。"""
     resolved_root = data_root.expanduser().resolve()
+    skill_root = Path(__file__).resolve().parents[1]
+    if resolved_root == skill_root or skill_root in resolved_root.parents:
+        raise ArchiveError("真实档案不得保存在 Skill 安装目录内。")
 
     if resolved_root.exists() and not resolved_root.is_dir():
         raise ArchiveError("所选档案位置不是目录。")
@@ -204,16 +213,39 @@ def initialize_archive(
             "schema_version": SCHEMA_VERSION,
         }
 
-    resolved_root.mkdir(parents=True, exist_ok=True)
-    initial_documents = (
-        (_required_archive_files(resolved_root)[0], TEACHER_PREFERENCE_INITIAL),
-        (_required_archive_files(resolved_root)[1], CONFIRMED_SAMPLES_INITIAL),
-        (_required_archive_files(resolved_root)[2], STUDENT_INDEX_INITIAL),
+    # 所有初始文件先在同一父目录的暂存目录中写完；只有全部成功后才一次性
+    # 把完整目录切换到正式位置，避免中途失败留下无法再次初始化的半成品。
+    resolved_root.parent.mkdir(parents=True, exist_ok=True)
+    target_existed_as_empty = resolved_root.is_dir()
+    staging_root = Path(
+        tempfile.mkdtemp(prefix=f".{resolved_root.name}-初始化-", dir=resolved_root.parent)
     )
-    for path, content in initial_documents:
-        atomic_write_text(path, content, resolved_root, backup=False)
+    moved_to_target = False
+    try:
+        initial_documents = (
+            (_required_archive_files(staging_root)[0], TEACHER_PREFERENCE_INITIAL),
+            (_required_archive_files(staging_root)[1], CONFIRMED_SAMPLES_INITIAL),
+            (_required_archive_files(staging_root)[2], STUDENT_INDEX_INITIAL),
+        )
+        for path, content in initial_documents:
+            atomic_write_text(path, content, staging_root, backup=False)
 
-    save_settings(resolved_root, settings_path)
+        if target_existed_as_empty:
+            resolved_root.rmdir()
+        os.replace(staging_root, resolved_root)
+        moved_to_target = True
+        save_settings(resolved_root, settings_path)
+    except Exception as exc:
+        # 只清理本次创建的暂存或正式目录；目标原先若是空目录，则恢复为空目录。
+        if moved_to_target and resolved_root.exists():
+            shutil.rmtree(resolved_root)
+        elif staging_root.exists():
+            shutil.rmtree(staging_root)
+        if target_existed_as_empty and not resolved_root.exists():
+            resolved_root.mkdir(parents=True)
+        if isinstance(exc, ArchiveError):
+            raise
+        raise ArchiveError(f"档案初始化失败，未保留半成品：{exc}") from exc
     return {
         "data_root": str(resolved_root),
         "schema_version": SCHEMA_VERSION,
@@ -307,18 +339,27 @@ def load_index(data_root: Path) -> list[StudentRecord]:
     if not path.is_file():
         raise ArchiveError("学生索引不存在，请先初始化或修复档案。")
 
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ArchiveError(f"学生索引无法读取：{exc}") from exc
+
+    expected_prefix = INDEX_HEADER.rstrip("\n").splitlines()
+    if lines[: len(expected_prefix)] != expected_prefix:
+        raise ArchiveError("学生索引表头或分隔行已损坏。")
+
     records: list[StudentRecord] = []
     seen_ids: set[str] = set()
     seen_directories: set[str] = set()
     for line_number, raw_line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), start=1
+        lines[len(expected_prefix) :], start=len(expected_prefix) + 1
     ):
         line = raw_line.strip()
-        if not line.startswith("|"):
+        if not line:
             continue
+        if not line.startswith("|") or not line.endswith("|"):
+            raise ArchiveError(f"学生索引第 {line_number} 行必须是六列表格行。")
         cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if cells[0] == "编号" or all(cell and set(cell) <= {"-", ":"} for cell in cells):
-            continue
         if len(cells) != 6:
             raise ArchiveError(f"学生索引第 {line_number} 行不是固定六列。")
         record = StudentRecord(*cells)
@@ -496,6 +537,13 @@ def validate_archive(data_root: Path) -> dict[str, object]:
         if not (student_root / "沟通记录").is_dir():
             errors.append(f"沟通记录目录不存在：{record.directory}/沟通记录")
 
+    students_root = resolved_root / "学生档案"
+    indexed_directories = {record.directory for record in records}
+    if students_root.is_dir():
+        for child in sorted(students_root.iterdir(), key=lambda item: item.name):
+            if child.is_dir() and child.name not in indexed_directories:
+                errors.append(f"未被索引引用的学生目录：{child.name}")
+
     return {
         "valid": not errors,
         "errors": errors,
@@ -571,24 +619,50 @@ def promote_student(
     updated_records = [updated if item.student_id == student_id else item for item in records]
 
     renamed = False
+    profile_backup: Path | None = None
     try:
         if new_root != old_root:
             old_root.rename(new_root)
             renamed = True
-        atomic_write_text(
+        profile_backup = atomic_write_text(
             new_root / "当前概况.md", new_profile_text, resolved_root
         )
         atomic_write_text(
             _index_path(resolved_root), _render_index(updated_records), resolved_root
         )
-    except Exception:
-        # 使用内存中的旧内容回滚，避免恢复逻辑依赖备份目录的时间戳。
-        current_root = new_root if renamed else old_root
-        if current_root.exists():
-            _replace_text_without_backup(current_root / "当前概况.md", old_profile_text)
+    except Exception as original_exc:
+        # 目录映射决定索引能否找到学生，因此先恢复目录；后续每一项补偿独立
+        # 尝试，任何一项失败都不能阻断其余回滚动作。
+        rollback_errors: list[str] = []
         if renamed and new_root.exists() and not old_root.exists():
-            new_root.rename(old_root)
-        _replace_text_without_backup(_index_path(resolved_root), old_index_text)
+            try:
+                new_root.rename(old_root)
+            except OSError as exc:
+                rollback_errors.append(f"目录恢复失败：{exc}")
+
+        restored_root = old_root if old_root.exists() else new_root
+        restore_targets = (
+            (restored_root / "当前概况.md", old_profile_text, "概况"),
+            (_index_path(resolved_root), old_index_text, "索引"),
+        )
+        for target, old_text, label in restore_targets:
+            try:
+                if target.is_file() and target.read_text(encoding="utf-8") == old_text:
+                    continue
+                # 概况已经成功替换、随后索引失败时，优先从写入前生成的备份
+                # 直接复制恢复；这样即使原子替换持续故障，也能回到旧内容。
+                if label == "概况" and profile_backup and profile_backup.is_file():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(profile_backup, target)
+                else:
+                    _replace_text_without_backup(target, old_text)
+            except (ArchiveError, OSError, UnicodeError) as exc:
+                rollback_errors.append(f"{label}恢复失败：{exc}")
+
+        if rollback_errors:
+            raise ArchiveError(
+                f"升年级失败：{original_exc}；回滚异常：{'；'.join(rollback_errors)}"
+            ) from original_exc
         raise
     return updated
 
@@ -657,8 +731,42 @@ def write_current_profile(
     )
     if any(line not in content for line in expected_lines):
         raise ArchiveError("当前概况中的基本信息与索引不一致，已拒绝写入。")
+    today = date.today().isoformat()
+    normalized_content = _replace_section_first_bullet(
+        content, "## 信息更新时间", today
+    )
+    updated_record = StudentRecord(
+        record.student_id,
+        record.name,
+        record.grade,
+        record.class_name,
+        record.directory,
+        today,
+    )
+    records = load_index(resolved_root)
+    updated_records = [
+        updated_record if item.student_id == student_id else item for item in records
+    ]
     target = resolved_root / "学生档案" / record.directory / "当前概况.md"
-    atomic_write_text(target, content, resolved_root)
+    old_profile = target.read_text(encoding="utf-8")
+    profile_backup: Path | None = None
+    try:
+        profile_backup = atomic_write_text(target, normalized_content, resolved_root)
+        atomic_write_text(
+            _index_path(resolved_root), _render_index(updated_records), resolved_root
+        )
+    except Exception as original_exc:
+        if target.is_file() and target.read_text(encoding="utf-8") != old_profile:
+            try:
+                if profile_backup and profile_backup.is_file():
+                    shutil.copy2(profile_backup, target)
+                else:
+                    _replace_text_without_backup(target, old_profile)
+            except (ArchiveError, OSError) as rollback_exc:
+                raise ArchiveError(
+                    f"概况写入失败：{original_exc}；旧概况恢复失败：{rollback_exc}"
+                ) from original_exc
+        raise
     return target
 
 
@@ -676,6 +784,7 @@ def save_communication(
     data_root: Path,
     student_id: str,
     communication_date: str,
+    channel: str,
     topic: str,
     content: str,
     confirmed: bool,
@@ -690,7 +799,18 @@ def save_communication(
     if parsed_date.isoformat() != communication_date:
         raise ArchiveError("沟通日期必须使用 YYYY-MM-DD 格式。")
 
+    normalized_channel = _validate_plain_field(channel, "沟通渠道")
     safe_topic = _sanitize_topic(topic)
+    if f"- 日期：{communication_date}" not in content:
+        raise ArchiveError("沟通记录中的日期与命令参数不一致。")
+    if f"- 渠道：{normalized_channel}" not in content:
+        raise ArchiveError("沟通记录中的渠道与命令参数不一致。")
+    if f"- 主题：{safe_topic}" not in content:
+        raise ArchiveError("沟通记录中的主题与命令参数不一致。")
+    update_flags = re.findall(r"^- 是否更新：(是|否)\s*$", content, re.MULTILINE)
+    if len(update_flags) != 1:
+        raise ArchiveError("是否更新长期概况只能填写“是”或“否”，且只能填写一次。")
+
     resolved_root = data_root.expanduser().resolve()
     records = load_index(resolved_root)
     record = _find_by_id(records, student_id)
@@ -778,6 +898,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     communication_parser.add_argument("--student-id", required=True)
     communication_parser.add_argument("--date", required=True)
+    communication_parser.add_argument("--channel", required=True)
     communication_parser.add_argument("--topic", required=True)
     communication_parser.add_argument("--input-file", type=Path, required=True)
     communication_parser.add_argument("--confirmed", action="store_true")
@@ -855,6 +976,7 @@ def main(argv: list[str] | None = None) -> int:
                     data_root,
                     args.student_id,
                     args.date,
+                    args.channel,
                     args.topic,
                     _read_utf8_input(args.input_file),
                     args.confirmed,
@@ -871,7 +993,7 @@ def main(argv: list[str] | None = None) -> int:
                 payload = {"ok": True, "student": asdict(student)}
             else:
                 raise ArchiveError(f"未知命令：{args.command}")
-    except ArchiveError as exc:
+    except (ArchiveError, OSError, UnicodeError) as exc:
         print(
             json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
             file=sys.stderr,

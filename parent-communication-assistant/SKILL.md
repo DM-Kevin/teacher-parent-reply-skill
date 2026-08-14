@@ -54,7 +54,7 @@ python3 "$SKILL_DIR/scripts/manage_profiles.py" --help
 - 电话／面谈；
 - 沟通结束与归档。
 
-新学生只询问年级、班级、姓名和本次问题，并允许教师自由描述。先把输入拆成“已确认事实／教师观察／主观判断”，展示拟建档内容。教师明确确认后，先运行`create --confirmed`，再将确认后的完整概况写入临时 UTF-8 文件并运行`write-current-profile --confirmed`。
+新学生只询问年级、班级、姓名和本次问题，并允许教师自由描述。提问前明确提醒：不要提供身份证号、家庭住址、电话号码等无关敏感信息。先把输入拆成“已确认事实／教师观察／主观判断”，展示拟建档内容。教师明确确认后，先运行`create --confirmed`，再将确认后的完整概况写入临时 UTF-8 文件并运行`write-current-profile --confirmed`。
 
 已有学生使用`find`精确匹配。出现同名时展示年级、班级和学生编号，请教师选择，不自行猜测。
 
@@ -103,12 +103,12 @@ python3 "$SKILL_DIR/scripts/manage_profiles.py" --help
 结束时统一询问一次：实际发送内容是直接采用还是有所修改；有修改时请教师粘贴最终版本。
 
 1. 生成结构化沟通摘要预览，不保存完整原始聊天。
-2. 教师确认摘要后，将其写入临时 UTF-8 文件，再运行`save-communication --confirmed`。
+2. 教师确认摘要后，将其写入临时 UTF-8 文件，再运行带日期、渠道和主题的`save-communication --confirmed`。
 3. 将需要进入长期概况的内容单独列出；只有教师明确确认后才运行`write-current-profile --confirmed`。
 4. 一次措辞修改只视为本次需要；两次相似修改提示可能偏好；三次相似且均确认后，才建议更新表达偏好。
 5. 更新表达偏好或样本时先展示完整预览，再分别运行`write-teacher-profile --confirmed`或`write-confirmed-samples --confirmed`。
 
-临时载荷文件不得放入 Skill 或真实档案目录。调用完成后可删除该临时文件。
+临时载荷文件不得放入 Skill 或真实档案目录。调用完成后必须删除该临时文件；删除失败时明确提醒教师其位置，不得静默留下副本。
 
 ## 常见失误
 
@@ -130,6 +130,6 @@ create --name NAME --grade GRADE --class-name CLASS --confirmed
 write-teacher-profile --input-file PATH --confirmed
 write-confirmed-samples --input-file PATH --confirmed
 write-current-profile --student-id ID --input-file PATH --confirmed
-save-communication --student-id ID --date YYYY-MM-DD --topic TOPIC --input-file PATH --confirmed
+save-communication --student-id ID --date YYYY-MM-DD --channel CHANNEL --topic TOPIC --input-file PATH --confirmed
 promote --student-id ID --grade GRADE --class-name CLASS --confirmed
 ```
