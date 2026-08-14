@@ -2,6 +2,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -120,3 +121,96 @@ def test_atomic_write_creates_recoverable_backup(tmp_path):
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == "旧内容"
     assert target.read_text(encoding="utf-8") == "新内容"
+
+
+def test_create_and_find_student(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+
+    created = manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+    matches = manager.find_students(data_root, "张三", "三年级", "2班")
+
+    assert created.student_id == "S0001"
+    assert matches == [created]
+    assert (data_root / "学生档案" / created.directory / "当前概况.md").exists()
+    assert (data_root / "学生档案" / created.directory / "沟通记录").is_dir()
+
+
+def test_same_name_same_class_gets_student_id_suffix(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+    first = manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+    second = manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+
+    assert first.directory == "张三-三年级2班"
+    assert second.directory == "张三-三年级2班-S0002"
+    assert len(manager.find_students(data_root, "张三")) == 2
+
+
+def test_create_requires_explicit_confirmation(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+
+    with pytest.raises(manager.ArchiveError, match="教师确认"):
+        manager.create_student(data_root, "张三", "三年级", "2班", confirmed=False)
+
+
+def test_student_fields_reject_path_separators(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+
+    with pytest.raises(manager.ArchiveError, match="非法字符"):
+        manager.create_student(data_root, "张/三", "三年级", "2班", confirmed=True)
+
+
+def test_validate_rejects_missing_student_directory(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+    student = manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+    (data_root / "学生档案" / student.directory).rename(tmp_path / "moved")
+
+    result = manager.validate_archive(data_root)
+
+    assert result["valid"] is False
+    assert result["errors"] == [f"索引中的学生目录不存在：{student.directory}"]
+
+
+def test_promote_student_renames_directory_and_updates_index(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+    student = manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+
+    promoted = manager.promote_student(
+        data_root, student.student_id, "四年级", "1班", confirmed=True
+    )
+
+    assert promoted.directory == "张三-四年级1班"
+    assert not (data_root / "学生档案" / student.directory).exists()
+    assert (data_root / "学生档案" / promoted.directory).exists()
+    profile = (
+        data_root / "学生档案" / promoted.directory / "当前概况.md"
+    ).read_text(encoding="utf-8")
+    assert "- 年级：四年级" in profile
+    assert "- 班级：1班" in profile
+
+
+def test_promote_student_refreshes_profile_update_date(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+    student = manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+    profile_path = data_root / "学生档案" / student.directory / "当前概况.md"
+    profile_path.write_text(
+        profile_path.read_text(encoding="utf-8").replace(
+            f"- {date.today().isoformat()}\n", "- 2020-01-01\n"
+        ),
+        encoding="utf-8",
+    )
+
+    promoted = manager.promote_student(
+        data_root, student.student_id, "四年级", "1班", confirmed=True
+    )
+
+    updated_profile = (
+        data_root / "学生档案" / promoted.directory / "当前概况.md"
+    ).read_text(encoding="utf-8")
+    assert f"## 信息更新时间\n\n- {date.today().isoformat()}" in updated_profile
