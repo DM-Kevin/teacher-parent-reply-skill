@@ -214,3 +214,174 @@ def test_promote_student_refreshes_profile_update_date(tmp_path):
         data_root / "学生档案" / promoted.directory / "当前概况.md"
     ).read_text(encoding="utf-8")
     assert f"## 信息更新时间\n\n- {date.today().isoformat()}" in updated_profile
+
+
+def complete_current_profile(student_id="S0001"):
+    """返回手工写明预期字段的测试概况，不复用生产模板。"""
+    return f"""# 当前概况
+
+## 基本信息
+
+- 学生编号：{student_id}
+- 姓名：张三
+- 年级：三年级
+- 班级：2班
+
+## 已确认的长期表现
+
+- 暂无长期结论。
+
+## 已采取的支持措施
+
+- 教师在课堂结束前提醒记录作业。
+
+## 家长关注点与沟通偏好
+
+- 偏好简短、具体的沟通。
+
+## 尚未解决的问题
+
+- 继续观察作业记录情况。
+
+## 最近一次沟通结论
+
+- 先由教师课堂提醒一周。
+
+## 信息更新时间
+
+- 2026-08-14
+"""
+
+
+def complete_communication_record():
+    """返回包含所有必填章节的沟通记录。"""
+    return """# 沟通记录
+
+## 已确认事实
+
+- 当天作业未完成。
+
+## 家长核心关注
+
+- 不希望额外增加压力。
+
+## 教师实际回应
+
+- 说明本次补做不是额外加量。
+
+## 达成共识
+
+- 先由教师在课堂提醒。
+
+## 待跟进事项
+
+- 一周后观察完成情况。
+"""
+
+
+def test_write_current_profile_requires_confirmation(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+    student = manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+    original = (
+        data_root / "学生档案" / student.directory / "当前概况.md"
+    ).read_text(encoding="utf-8")
+
+    with pytest.raises(manager.ArchiveError, match="教师确认"):
+        manager.write_current_profile(
+            data_root, student.student_id, complete_current_profile(), confirmed=False
+        )
+
+    assert (
+        data_root / "学生档案" / student.directory / "当前概况.md"
+    ).read_text(encoding="utf-8") == original
+
+
+def test_write_current_profile_rejects_mismatched_student(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+    student = manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+
+    with pytest.raises(manager.ArchiveError, match="基本信息与索引不一致"):
+        manager.write_current_profile(
+            data_root,
+            student.student_id,
+            complete_current_profile().replace("- 姓名：张三", "- 姓名：李四"),
+            confirmed=True,
+        )
+
+
+def test_save_communication_creates_unique_record_and_updates_date(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+    student = manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+    content = complete_communication_record()
+
+    first = manager.save_communication(
+        data_root, student.student_id, "2026-08-14", "作业完成问题", content, True
+    )
+    second = manager.save_communication(
+        data_root, student.student_id, "2026-08-14", "作业完成问题", content, True
+    )
+
+    assert first.name == "2026-08-14-作业完成问题.md"
+    assert second.name == "2026-08-14-作业完成问题-02.md"
+    assert manager.find_students(data_root, "张三")[0].updated_at == "2026-08-14"
+
+
+def test_write_teacher_profile_requires_headings_and_confirmation(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+    content = """# 表达偏好
+
+## 常用称呼
+- 学生姓名加“妈妈”或“爸爸”。
+
+## 回复长度
+- 通常一个微信气泡。
+
+## 语气与直接程度
+- 自然、简短。
+
+## 语气词与表情
+- 偶尔使用“哈”。
+
+## 开场与收尾
+- 直接说明事情，最后确认下一步。
+
+## 避免表达
+- 避免论文式概念。
+"""
+
+    with pytest.raises(manager.ArchiveError, match="教师确认"):
+        manager.write_teacher_profile(data_root, content, confirmed=False)
+
+    path = manager.write_teacher_profile(data_root, content, confirmed=True)
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_confirmed_samples_reject_more_than_ten(tmp_path):
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, tmp_path / "settings.json")
+    content = "# 已确认表达样本\n\n" + "\n".join(
+        f"## 样本 {number}\n\n- 内容 {number}" for number in range(1, 12)
+    )
+
+    with pytest.raises(manager.ArchiveError, match="最多保留 10 条"):
+        manager.write_confirmed_samples(data_root, content, confirmed=True)
+
+
+def test_cli_returns_json_for_find(tmp_path, capsys):
+    settings_path = tmp_path / "settings.json"
+    data_root = tmp_path / "archive"
+    manager.initialize_archive(data_root, settings_path)
+    manager.create_student(data_root, "张三", "三年级", "2班", confirmed=True)
+
+    exit_code = manager.main(
+        ["--settings", str(settings_path), "find", "--name", "张三"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert payload["students"][0]["student_id"] == "S0001"

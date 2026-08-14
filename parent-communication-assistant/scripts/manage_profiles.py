@@ -8,12 +8,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
 import shutil
+import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
 
@@ -47,6 +49,36 @@ INDEX_HEADER = """# 学生索引
 STUDENT_ID_RE = re.compile(r"^S\d{4}$")
 VALID_GRADES = {"一年级", "二年级", "三年级", "四年级", "五年级", "六年级"}
 FORBIDDEN_FIELD_CHARS = {"|", "/", "\\", "\n", "\r"}
+
+CURRENT_PROFILE_HEADINGS = (
+    "# 当前概况",
+    "## 基本信息",
+    "## 已确认的长期表现",
+    "## 已采取的支持措施",
+    "## 家长关注点与沟通偏好",
+    "## 尚未解决的问题",
+    "## 最近一次沟通结论",
+    "## 信息更新时间",
+)
+
+COMMUNICATION_HEADINGS = (
+    "# 沟通记录",
+    "## 已确认事实",
+    "## 家长核心关注",
+    "## 教师实际回应",
+    "## 达成共识",
+    "## 待跟进事项",
+)
+
+TEACHER_PROFILE_HEADINGS = (
+    "# 表达偏好",
+    "## 常用称呼",
+    "## 回复长度",
+    "## 语气与直接程度",
+    "## 语气词与表情",
+    "## 开场与收尾",
+    "## 避免表达",
+)
 
 
 class ArchiveError(RuntimeError):
@@ -559,3 +591,296 @@ def promote_student(
         _replace_text_without_backup(_index_path(resolved_root), old_index_text)
         raise
     return updated
+
+
+def _require_confirmation(confirmed: bool, action: str) -> None:
+    """集中执行长期写入确认门，防止某个入口遗漏保护。"""
+    if not confirmed:
+        raise ArchiveError(f"{action}前必须获得教师确认。")
+
+
+def _require_headings(content: str, headings: tuple[str, ...], document: str) -> None:
+    """校验结构化 Markdown 的必填章节，避免写入无法继续维护的文件。"""
+    missing = [heading for heading in headings if heading not in content]
+    if missing:
+        raise ArchiveError(f"{document}缺少必填章节：{'、'.join(missing)}")
+
+
+def write_teacher_profile(
+    data_root: Path,
+    content: str,
+    confirmed: bool,
+) -> Path:
+    """在教师确认后写入精简表达偏好。"""
+    _require_confirmation(confirmed, "写入教师表达偏好")
+    _require_headings(content, TEACHER_PROFILE_HEADINGS, "教师表达偏好")
+    resolved_root = data_root.expanduser().resolve()
+    target = resolved_root / "教师档案" / "表达偏好.md"
+    atomic_write_text(target, content, resolved_root)
+    return target
+
+
+def write_confirmed_samples(
+    data_root: Path,
+    content: str,
+    confirmed: bool,
+) -> Path:
+    """写入少量已确认样本；超过十条时要求调用方先筛选代表样本。"""
+    _require_confirmation(confirmed, "写入教师表达样本")
+    if "# 已确认表达样本" not in content:
+        raise ArchiveError("教师表达样本缺少标题：# 已确认表达样本")
+    sample_count = len(re.findall(r"^## 样本(?:\s|$)", content, flags=re.MULTILINE))
+    if sample_count > 10:
+        raise ArchiveError("已确认表达样本最多保留 10 条，请先筛选代表样本。")
+    resolved_root = data_root.expanduser().resolve()
+    target = resolved_root / "教师档案" / "已确认表达样本.md"
+    atomic_write_text(target, content, resolved_root)
+    return target
+
+
+def write_current_profile(
+    data_root: Path,
+    student_id: str,
+    content: str,
+    confirmed: bool,
+) -> Path:
+    """在确认后覆盖当前概况，并核对内容确实属于选中的学生。"""
+    _require_confirmation(confirmed, "写入学生当前概况")
+    _require_headings(content, CURRENT_PROFILE_HEADINGS, "学生当前概况")
+    resolved_root = data_root.expanduser().resolve()
+    record = _find_by_id(load_index(resolved_root), student_id)
+    expected_lines = (
+        f"- 学生编号：{record.student_id}",
+        f"- 姓名：{record.name}",
+        f"- 年级：{record.grade}",
+        f"- 班级：{record.class_name}",
+    )
+    if any(line not in content for line in expected_lines):
+        raise ArchiveError("当前概况中的基本信息与索引不一致，已拒绝写入。")
+    target = resolved_root / "学生档案" / record.directory / "当前概况.md"
+    atomic_write_text(target, content, resolved_root)
+    return target
+
+
+def _sanitize_topic(topic: str) -> str:
+    """将沟通主题转换成安全、仍可读的文件名片段。"""
+    normalized = topic.strip()
+    normalized = re.sub(r'[<>:"/\\|?*]+', "-", normalized)
+    normalized = re.sub(r"-+", "-", normalized).strip("- .")
+    if not normalized:
+        raise ArchiveError("沟通主题无法生成有效文件名。")
+    return normalized
+
+
+def save_communication(
+    data_root: Path,
+    student_id: str,
+    communication_date: str,
+    topic: str,
+    content: str,
+    confirmed: bool,
+) -> Path:
+    """保存经确认的沟通摘要；不保存截图或完整原始聊天。"""
+    _require_confirmation(confirmed, "保存沟通记录")
+    _require_headings(content, COMMUNICATION_HEADINGS, "沟通记录")
+    try:
+        parsed_date = date.fromisoformat(communication_date)
+    except ValueError as exc:
+        raise ArchiveError("沟通日期必须使用 YYYY-MM-DD 格式。") from exc
+    if parsed_date.isoformat() != communication_date:
+        raise ArchiveError("沟通日期必须使用 YYYY-MM-DD 格式。")
+
+    safe_topic = _sanitize_topic(topic)
+    resolved_root = data_root.expanduser().resolve()
+    records = load_index(resolved_root)
+    record = _find_by_id(records, student_id)
+    records_root = resolved_root / "学生档案" / record.directory / "沟通记录"
+    candidate = records_root / f"{communication_date}-{safe_topic}.md"
+    sequence = 2
+    while candidate.exists():
+        candidate = records_root / f"{communication_date}-{safe_topic}-{sequence:02d}.md"
+        sequence += 1
+
+    atomic_write_text(candidate, content, resolved_root, backup=False)
+    updated_record = StudentRecord(
+        record.student_id,
+        record.name,
+        record.grade,
+        record.class_name,
+        record.directory,
+        max(record.updated_at, communication_date),
+    )
+    updated_records = [
+        updated_record if item.student_id == student_id else item for item in records
+    ]
+    try:
+        atomic_write_text(
+            _index_path(resolved_root), _render_index(updated_records), resolved_root
+        )
+    except Exception:
+        # 新记录尚未对外可见时，只删除本次精确创建的文件以保持索引一致。
+        candidate.unlink(missing_ok=True)
+        raise
+    return candidate
+
+
+def _read_utf8_input(path: Path) -> str:
+    """读取调用方准备的待确认 Markdown，不删除或改写输入文件。"""
+    try:
+        return path.expanduser().read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ArchiveError(f"输入文件无法按 UTF-8 读取：{exc}") from exc
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """构建稳定的 JSON 命令行接口，供 Skill 直接执行。"""
+    parser = argparse.ArgumentParser(description="管理家长沟通助手的本地档案")
+    parser.add_argument("--settings", type=Path, default=default_settings_path())
+    subparsers = parser.add_subparsers(dest="command")
+
+    init_parser = subparsers.add_parser("init", help="初始化或连接档案目录")
+    init_parser.add_argument("--data-root", type=Path, default=default_data_root())
+
+    subparsers.add_parser("validate", help="只读校验档案一致性")
+
+    find_parser = subparsers.add_parser("find", help="精确查找学生")
+    find_parser.add_argument("--name", required=True)
+    find_parser.add_argument("--grade")
+    find_parser.add_argument("--class-name")
+
+    create_parser = subparsers.add_parser("create", help="创建学生档案")
+    create_parser.add_argument("--name", required=True)
+    create_parser.add_argument("--grade", required=True)
+    create_parser.add_argument("--class-name", required=True)
+    create_parser.add_argument("--confirmed", action="store_true")
+
+    teacher_parser = subparsers.add_parser(
+        "write-teacher-profile", help="写入教师表达偏好"
+    )
+    teacher_parser.add_argument("--input-file", type=Path, required=True)
+    teacher_parser.add_argument("--confirmed", action="store_true")
+
+    samples_parser = subparsers.add_parser(
+        "write-confirmed-samples", help="写入已确认表达样本"
+    )
+    samples_parser.add_argument("--input-file", type=Path, required=True)
+    samples_parser.add_argument("--confirmed", action="store_true")
+
+    profile_parser = subparsers.add_parser(
+        "write-current-profile", help="写入学生当前概况"
+    )
+    profile_parser.add_argument("--student-id", required=True)
+    profile_parser.add_argument("--input-file", type=Path, required=True)
+    profile_parser.add_argument("--confirmed", action="store_true")
+
+    communication_parser = subparsers.add_parser(
+        "save-communication", help="保存一次沟通摘要"
+    )
+    communication_parser.add_argument("--student-id", required=True)
+    communication_parser.add_argument("--date", required=True)
+    communication_parser.add_argument("--topic", required=True)
+    communication_parser.add_argument("--input-file", type=Path, required=True)
+    communication_parser.add_argument("--confirmed", action="store_true")
+
+    promote_parser = subparsers.add_parser("promote", help="更新学生年级和班级")
+    promote_parser.add_argument("--student-id", required=True)
+    promote_parser.add_argument("--grade", required=True)
+    promote_parser.add_argument("--class-name", required=True)
+    promote_parser.add_argument("--confirmed", action="store_true")
+    return parser
+
+
+def _validated_data_root(settings_path: Path) -> Path:
+    """读取设置并阻止在索引不一致时执行任何修改命令。"""
+    settings = load_settings(settings_path)
+    data_root = Path(str(settings["data_root"]))
+    result = validate_archive(data_root)
+    if not result["valid"]:
+        raise ArchiveError("档案校验失败，已停止写入：" + "；".join(result["errors"]))
+    return data_root
+
+
+def main(argv: list[str] | None = None) -> int:
+    """执行命令并输出单个 JSON 对象，避免调用方解析自然语言日志。"""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help()
+        return 0
+
+    try:
+        if args.command == "init":
+            result = initialize_archive(args.data_root, args.settings)
+            payload = {"ok": True, **result}
+        elif args.command == "validate":
+            settings = load_settings(args.settings)
+            result = validate_archive(Path(str(settings["data_root"])))
+            payload = {"ok": True, **result}
+        else:
+            data_root = _validated_data_root(args.settings)
+            if args.command == "find":
+                students = find_students(
+                    data_root, args.name, args.grade, args.class_name
+                )
+                payload = {"ok": True, "students": [asdict(item) for item in students]}
+            elif args.command == "create":
+                student = create_student(
+                    data_root,
+                    args.name,
+                    args.grade,
+                    args.class_name,
+                    args.confirmed,
+                )
+                payload = {"ok": True, "student": asdict(student)}
+            elif args.command == "write-teacher-profile":
+                path = write_teacher_profile(
+                    data_root, _read_utf8_input(args.input_file), args.confirmed
+                )
+                payload = {"ok": True, "path": str(path)}
+            elif args.command == "write-confirmed-samples":
+                path = write_confirmed_samples(
+                    data_root, _read_utf8_input(args.input_file), args.confirmed
+                )
+                payload = {"ok": True, "path": str(path)}
+            elif args.command == "write-current-profile":
+                path = write_current_profile(
+                    data_root,
+                    args.student_id,
+                    _read_utf8_input(args.input_file),
+                    args.confirmed,
+                )
+                payload = {"ok": True, "path": str(path)}
+            elif args.command == "save-communication":
+                path = save_communication(
+                    data_root,
+                    args.student_id,
+                    args.date,
+                    args.topic,
+                    _read_utf8_input(args.input_file),
+                    args.confirmed,
+                )
+                payload = {"ok": True, "path": str(path)}
+            elif args.command == "promote":
+                student = promote_student(
+                    data_root,
+                    args.student_id,
+                    args.grade,
+                    args.class_name,
+                    args.confirmed,
+                )
+                payload = {"ok": True, "student": asdict(student)}
+            else:
+                raise ArchiveError(f"未知命令：{args.command}")
+    except ArchiveError as exc:
+        print(
+            json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
+            file=sys.stderr,
+        )
+        return 2
+
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
