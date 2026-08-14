@@ -23,6 +23,18 @@
 - 不保存身份证号、家庭住址、电话号码等与沟通无关的敏感信息；截图和完整原始聊天默认不落盘。
 - 不虚构学生表现，不将主观判断写成事实，不对学生或家长作心理诊断或人格标签。
 
+## Execution Corrections
+
+本节覆盖下文与其冲突的测试步骤：
+
+- 不使用搜索 `SKILL.md` 或 reference 文件固定文字的方式证明 Skill 有效；这类静态断言不能验证模型行为。
+- 不创建或保留 `tests/test_skill_contract.py`。Skill 包结构和 frontmatter 使用官方 `quick_validate.py` 校验。
+- 在编写 `SKILL.md` 和领域 references 前，先用三个新鲜、无 Skill 的代理场景建立行为基线，并将原始输出保存到 `tests/evaluations/baseline.md`。
+- 完成 Skill 后，用三个同源场景在新鲜上下文中复测，将原始输出与逐项评分保存到 `tests/evaluations/with-skill.md`。
+- Task 1 中关于 `tests/test_skill_contract.py` 的步骤由“运行官方校验并确认骨架有效”替代。
+- Task 5 和 Task 6 中关于 `tests/test_skill_contract.py` 的步骤由“对照基线失败写最小规则，并在 Task 7 行为复测”替代。
+- Python 档案脚本仍严格执行测试先行；`tests/test_manage_profiles.py` 的红—绿循环保持不变。
+
 ---
 
 ## Planned File Structure
@@ -43,8 +55,13 @@
 │       ├── profile-schema.md
 │       └── risk-boundaries.md
 └── tests/
-    ├── test_manage_profiles.py
-    └── test_skill_contract.py
+    ├── evaluations/
+    │   ├── baseline.md
+    │   └── with-skill.md
+    ├── fixtures/
+    │   ├── teacher-style-samples.md
+    │   └── difficult-parent-case.md
+    └── test_manage_profiles.py
 ```
 
 File responsibilities:
@@ -56,7 +73,7 @@ File responsibilities:
 - `profile-schema.md`: 所有 Markdown 档案的固定字段、模板、长度和客观表达规则。
 - `risk-boundaries.md`: 高风险识别、事实边界、升级学校流程和禁止承诺。
 - `test_manage_profiles.py`: 档案脚本的单元测试和故障恢复测试。
-- `test_skill_contract.py`: Skill 结构、渐进读取、确认门和输出协议的静态契约测试。
+- `evaluations/`: 保存无 Skill 基线和加载 Skill 后的新鲜上下文行为结果。
 
 ### Task 1: Scaffold a valid Skill package
 
