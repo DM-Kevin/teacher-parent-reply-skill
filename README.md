@@ -25,8 +25,6 @@ parent-communication-assistant/
 │   ├── profile-schema.md            # 学生档案字段与客观化规则
 │   └── risk-boundaries.md           # 高风险场景边界
 └── scripts/manage_profiles.py   # 本地档案管理脚本（CLI）
-docs/                            # 设计方案与实施计划
-tests/                           # 测试与评测
 ```
 
 ## 档案管理脚本
@@ -55,5 +53,4 @@ promote --student-id ID --grade GRADE --class-name CLASS --confirmed
 
 ```bash
 python3 parent-communication-assistant/scripts/manage_profiles.py --help
-python3 -m pytest tests/
 ```
