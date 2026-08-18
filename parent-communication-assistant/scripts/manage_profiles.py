@@ -518,14 +518,36 @@ def create_student(
     return record
 
 
+def _teacher_profile_initialized(data_root: Path) -> bool:
+    """判断表达偏好是否已由教师确认写入。
+
+    初始模板中包含“尚未初始化”标记，只有该标记被真实内容替换后才算完成初始化。
+    """
+    profile_path = data_root / "教师档案" / "表达偏好.md"
+    try:
+        content = profile_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "尚未初始化" not in content
+
+
 def validate_archive(data_root: Path) -> dict[str, object]:
-    """只读校验索引和学生目录一致性，返回适合展示的错误清单。"""
+    """只读校验索引和学生目录一致性，返回适合展示的错误清单。
+
+    额外返回 teacher_profile_initialized 字段，供 Skill 判断初始化门禁是否完成：
+    档案结构合法但表达偏好未初始化时，valid 仍为 True，由调用方决定是否放行。
+    """
     resolved_root = data_root.expanduser().resolve()
     errors: list[str] = []
     try:
         records = load_index(resolved_root)
     except (ArchiveError, OSError) as exc:
-        return {"valid": False, "errors": [str(exc)], "student_count": 0}
+        return {
+            "valid": False,
+            "errors": [str(exc)],
+            "student_count": 0,
+            "teacher_profile_initialized": False,
+        }
 
     for record in records:
         student_root = resolved_root / "学生档案" / record.directory
@@ -548,6 +570,7 @@ def validate_archive(data_root: Path) -> dict[str, object]:
         "valid": not errors,
         "errors": errors,
         "student_count": len(records),
+        "teacher_profile_initialized": _teacher_profile_initialized(resolved_root),
     }
 
 
