@@ -1,5 +1,5 @@
 ---
-name: teacher-parent-reply-skill
+name: 教师高情商回复家长
 description: Use when 小学教师需要准备家长沟通、回复家长微信、处理家长质疑或理念争论、准备电话面谈、从历史对话学习教师语气，或整理学生沟通档案。
 ---
 
