@@ -1,4 +1,4 @@
 interface:
-  display_name: "家长沟通助手"
+  display_name: "teacher-parent-reply-skill"
   short_description: "帮助小学教师准备沟通、生成自然回复并沉淀本地学生档案"
-  default_prompt: "使用 $parent-communication-assistant 帮我准备并回复这次家长沟通。"
+  default_prompt: "使用 $teacher-parent-reply-skill 帮我准备并回复这次家长沟通。"
